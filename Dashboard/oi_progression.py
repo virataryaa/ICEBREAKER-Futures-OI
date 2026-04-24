@@ -49,6 +49,53 @@ def load_data(commodity: str) -> pd.DataFrame:
     return df[df["open_interest"] > 0].copy()
 
 
+@st.cache_data
+def load_data_with_share(commodity: str) -> pd.DataFrame:
+    """Same as load_data but adds oi_share_pct = contract OI / total commodity OI on that date."""
+    df = load_data(commodity)
+    total_oi = df.groupby("Date")["open_interest"].sum().rename("total_oi")
+    df = df.merge(total_oi, on="Date")
+    df["oi_share_pct"] = df["open_interest"] / df["total_oi"] * 100
+    return df
+
+
+def compute_share_band(commodity, month, hist_year_range, smooth_window=7):
+    """Returns (band, curr_df, current_sym) using oi_share_pct as the metric."""
+    df    = load_data_with_share(commodity)
+    dm    = df[df["month"] == month].copy()
+    today = pd.Timestamp(date.today())
+
+    ltd_by_sym  = dm.groupby("ice_symbol")["LTD"].first()
+    active_syms = ltd_by_sym[ltd_by_sym >= today].sort_values().index.tolist()
+    hist_syms   = ltd_by_sym[ltd_by_sym <  today].sort_values().index.tolist()
+
+    if not active_syms:
+        return None
+
+    hist_df = dm[
+        dm["ice_symbol"].isin(hist_syms) &
+        dm["year"].between(hist_year_range[0], hist_year_range[1])
+    ]
+
+    band = (
+        hist_df.groupby("days_to_expiry")["oi_share_pct"]
+        .agg(
+            hist_min="min",
+            hist_max="max",
+            hist_mean="mean",
+            hist_q25=lambda x: x.quantile(0.25),
+            hist_q75=lambda x: x.quantile(0.75),
+        )
+        .reset_index()
+        .sort_values("days_to_expiry")
+    )
+    for col in ["hist_min", "hist_max", "hist_mean", "hist_q25", "hist_q75"]:
+        band[col] = band[col].rolling(smooth_window, center=True, min_periods=1).mean()
+
+    curr_df = dm[dm["ice_symbol"] == active_syms[0]].sort_values("Date").copy()
+    return band, curr_df, active_syms[0]
+
+
 def compute_band_and_current(commodity, month, hist_year_range, smooth_window=7):
     """Returns (band, curr_df, current_sym, active_syms, hist_syms) or None if no active contract."""
     df      = load_data(commodity)
@@ -411,3 +458,120 @@ with st.expander("Current Contract Data", expanded=False):
     tbl.columns = ["Date", "DTE", "Open Interest", "Volume", "Settlement"]
     tbl["Date"] = tbl["Date"].dt.strftime("%Y-%m-%d")
     st.dataframe(tbl, use_container_width=True, hide_index=True)
+
+
+# ── OI Share chart ────────────────────────────────────────────────────────────
+st.markdown("---")
+st.markdown(f"### {current_contract} — Share of Total {commodity} Market OI (%)")
+st.caption("Contract OI divided by sum of all active contracts' OI on that date.")
+
+share_result = compute_share_band(commodity, selected_month, hist_range)
+
+if share_result is not None:
+    s_band, s_curr, s_sym = share_result
+
+    # Override with sidebar-selected contract
+    df_share_full = load_data_with_share(commodity)
+    s_curr = df_share_full[df_share_full["ice_symbol"] == current_contract].sort_values("Date").copy()
+
+    s_latest    = s_curr.iloc[-1]
+    s_dte_now   = int(s_latest["days_to_expiry"])
+    s_share_now = s_latest["oi_share_pct"]
+    s_date_str  = s_latest["Date"].strftime("%b %d, %Y")
+
+    s_closest   = (s_band["days_to_expiry"] - s_dte_now).abs().idxmin()
+    s_band_now  = s_band.loc[s_closest]
+    s_avg       = s_band_now["hist_mean"]
+    s_pct_diff  = (s_share_now - s_avg)
+
+    # KPI row
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    sc1.metric("Contract",        current_contract)
+    sc2.metric("Current Share",   f"{s_share_now:.1f}%")
+    sc3.metric("As of",           s_date_str)
+    sc4.metric("vs Hist Mean",    f"{s_avg:.1f}%", delta=f"{s_pct_diff:+.1f}pp")
+
+    # Build chart
+    fig_share = go.Figure()
+
+    # Outer band min-max
+    fig_share.add_trace(go.Scatter(
+        x=s_band["days_to_expiry"], y=s_band["hist_max"],
+        mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip",
+    ))
+    fig_share.add_trace(go.Scatter(
+        x=s_band["days_to_expiry"], y=s_band["hist_min"],
+        mode="lines", line=dict(width=0),
+        fill="tonexty", fillcolor="rgba(52, 168, 83, 0.10)",
+        name="Min-Max Range", hoverinfo="skip",
+    ))
+
+    # Inner band q25-q75
+    fig_share.add_trace(go.Scatter(
+        x=s_band["days_to_expiry"], y=s_band["hist_q75"],
+        mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip",
+    ))
+    fig_share.add_trace(go.Scatter(
+        x=s_band["days_to_expiry"], y=s_band["hist_q25"],
+        mode="lines", line=dict(width=0),
+        fill="tonexty", fillcolor="rgba(52, 168, 83, 0.25)",
+        name="25th-75th Pct", hoverinfo="skip",
+    ))
+
+    # Mean line
+    fig_share.add_trace(go.Scatter(
+        x=s_band["days_to_expiry"], y=s_band["hist_mean"],
+        mode="lines", line=dict(color="#34A853", width=2, dash="dash"),
+        name="Historical Mean",
+        hovertemplate="DTE: %{x}<br>Mean Share: %{y:.1f}%<extra>Mean</extra>",
+    ))
+
+    # Current contract line
+    fig_share.add_trace(go.Scatter(
+        x=s_curr["days_to_expiry"], y=s_curr["oi_share_pct"],
+        mode="lines", line=dict(color="#E8470A", width=2.5),
+        name=current_contract,
+        hovertemplate=f"<b>{current_contract}</b><br>DTE: %{{x}}<br>Share: %{{y:.1f}}%<extra></extra>",
+    ))
+
+    # Latest dot
+    fig_share.add_trace(go.Scatter(
+        x=[s_dte_now], y=[s_share_now],
+        mode="markers",
+        marker=dict(color="#E8470A", size=8, line=dict(color="white", width=1.5)),
+        showlegend=False,
+        hovertemplate=f"<b>{s_date_str}</b><br>DTE: {s_dte_now}<br>Share: {s_share_now:.1f}%<extra></extra>",
+    ))
+
+    # DTE reference line
+    fig_share.add_vline(x=s_dte_now, line=dict(color=COLORS["vline"], width=1, dash="dot"))
+
+    fig_share.update_layout(
+        xaxis=dict(
+            title="Days to Expiry",
+            range=[dte_sel[0], dte_sel[1]],
+            showgrid=True, gridcolor=COLORS["grid"],
+            zeroline=False, tickfont=dict(size=12, color=COLORS["font"]),
+        ),
+        yaxis=dict(
+            title="Share of Total Market OI (%)",
+            showgrid=True, gridcolor=COLORS["grid"],
+            tickformat=".1f", ticksuffix="%",
+            zeroline=False, tickfont=dict(size=12, color=COLORS["font"]),
+        ),
+        plot_bgcolor=COLORS["bg"],
+        paper_bgcolor=COLORS["bg"],
+        font=dict(color=COLORS["font"], family="Inter, sans-serif"),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.01,
+            xanchor="left", x=0,
+            bgcolor="rgba(255,255,255,0)", font=dict(size=11),
+        ),
+        hovermode="x unified",
+        height=500,
+        margin=dict(l=70, r=30, t=40, b=60),
+    )
+
+    st.plotly_chart(fig_share, use_container_width=True)
+else:
+    st.info("No historical data available for OI share chart.")
