@@ -8,7 +8,7 @@ from datetime import date
 
 st.set_page_config(page_title="OI Progression", page_icon="📈", layout="wide")
 
-DB_PATH = Path(r"C:\Users\virat.arya\ETG\SoftsDatabase - Documents\Database\Hardmine\ICEBREAKER\Futures\Database")
+DB_PATH = Path(__file__).parent.parent / "Database"
 
 COMMODITIES = {
     "KC":  ("kc_futures.parquet",  "Coffee (KC)"),
