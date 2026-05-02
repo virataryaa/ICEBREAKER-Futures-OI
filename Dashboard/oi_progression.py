@@ -471,37 +471,7 @@ with tab_vol:
     df_enr     = load_enriched(commodity, mt)
     df_enr_m   = df_enr[df_enr["month"] == selected_month].copy()
 
-    # ── Chart 1: Volume / OI Ratio ────────────────────────────────────────────
-    st.markdown("#### Volume / OI Ratio")
-    st.caption("Daily volume divided by open interest — measures turnover rate / speculative activity.")
-
-    res_vr = compute_band(commodity, selected_month, hist_range, "vol_oi_ratio", use_enriched=True, mtime=mt)
-    if res_vr:
-        b_vr, _, _, _ = res_vr
-        c_vr  = df_enr[df_enr["ice_symbol"] == current_contract].sort_values("Date").copy()
-        lat   = c_vr.iloc[-1]
-        v_now = lat["vol_oi_ratio"]
-        d_now = int(lat["days_to_expiry"])
-        idx_  = (b_vr["days_to_expiry"] - d_now).abs().idxmin()
-        avg_  = b_vr.loc[idx_, "hist_mean"]
-
-        kpi_row([
-            ("Contract",     current_contract),
-            ("Vol/OI Ratio", f"{v_now:.2f}x"),
-            ("As of",        lat["Date"].strftime("%b %d, %Y")),
-            ("vs Hist Mean", f"{avg_:.2f}x", f"{v_now-avg_:+.2f}x"),
-        ])
-
-        fig_vr = build_chart(b_vr, c_vr, "vol_oi_ratio", current_contract,
-            title=f"<b>{commodity} {month_name}</b>  |  Volume / OI Ratio",
-            y_title="Vol / OI Ratio", y_fmt=".2f", y_suffix="x",
-            outer_color=C["vr_outer"], inner_color=C["vr_inner"], avg_color=C["vr_avg"],
-            dte_range=dte_range, dte_now=d_now, height=460)
-        st.plotly_chart(fig_vr, use_container_width=True)
-
-    st.markdown("---")
-
-    # ── Chart 2: Volume Market Share ──────────────────────────────────────────
+    # ── Chart 1: Volume Market Share ──────────────────────────────────────────
     st.markdown("#### Volume Market Share (%)")
     st.caption("Contract daily volume as % of total commodity volume on that date.")
 
@@ -564,3 +534,32 @@ with tab_vol:
             outer_color=C["rv_outer"], inner_color=C["rv_inner"], avg_color=C["rv_avg"],
             dte_range=dte_range, dte_now=d_now, height=460)
         st.plotly_chart(fig_rv, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── Chart 4: Volume / OI Ratio (Proof of Concept) ────────────────────────
+    with st.expander("Volume / OI Ratio (Proof of Concept)", expanded=False):
+        st.caption("Daily volume divided by open interest — measures turnover rate / speculative activity.")
+        res_vr = compute_band(commodity, selected_month, hist_range, "vol_oi_ratio", use_enriched=True, mtime=mt)
+        if res_vr:
+            b_vr, _, _, _ = res_vr
+            c_vr  = df_enr[df_enr["ice_symbol"] == current_contract].sort_values("Date").copy()
+            lat   = c_vr.iloc[-1]
+            v_now = lat["vol_oi_ratio"]
+            d_now = int(lat["days_to_expiry"])
+            idx_  = (b_vr["days_to_expiry"] - d_now).abs().idxmin()
+            avg_  = b_vr.loc[idx_, "hist_mean"]
+
+            kpi_row([
+                ("Contract",     current_contract),
+                ("Vol/OI Ratio", f"{v_now:.2f}x"),
+                ("As of",        lat["Date"].strftime("%b %d, %Y")),
+                ("vs Hist Mean", f"{avg_:.2f}x", f"{v_now-avg_:+.2f}x"),
+            ])
+
+            fig_vr = build_chart(b_vr, c_vr, "vol_oi_ratio", current_contract,
+                title=f"<b>{commodity} {month_name}</b>  |  Volume / OI Ratio",
+                y_title="Vol / OI Ratio", y_fmt=".2f", y_suffix="x",
+                outer_color=C["vr_outer"], inner_color=C["vr_inner"], avg_color=C["vr_avg"],
+                dte_range=dte_range, dte_now=d_now, height=460)
+            st.plotly_chart(fig_vr, use_container_width=True)
