@@ -58,8 +58,14 @@ C = {
 
 
 # ── Data loaders ──────────────────────────────────────────────────────────────
+def _mtime(commodity: str) -> float:
+    filename, _ = COMMODITIES[commodity]
+    p = DB_PATH / filename
+    return p.stat().st_mtime if p.exists() else 0.0
+
+
 @st.cache_data
-def load_data(commodity: str) -> pd.DataFrame:
+def load_data(commodity: str, mtime: float = 0.0) -> pd.DataFrame:
     filename, _ = COMMODITIES[commodity]
     df = pd.read_parquet(DB_PATH / filename)
     df["Date"] = pd.to_datetime(df["Date"])
@@ -69,9 +75,9 @@ def load_data(commodity: str) -> pd.DataFrame:
 
 
 @st.cache_data
-def load_enriched(commodity: str) -> pd.DataFrame:
+def load_enriched(commodity: str, mtime: float = 0.0) -> pd.DataFrame:
     """Adds oi_share_pct, vol_share_pct, vol_oi_ratio to every row."""
-    df = load_data(commodity)
+    df = load_data(commodity, mtime)
     tot_oi  = df.groupby("Date")["open_interest"].sum().rename("total_oi")
     tot_vol = df.groupby("Date")["volume"].sum().rename("total_vol")
     df = df.merge(tot_oi, on="Date").merge(tot_vol, on="Date")
@@ -90,13 +96,13 @@ def _split_contracts(dm):
 
 
 def compute_band(commodity, month, hist_year_range, metric_col,
-                 roll_n=None, smooth_window=7, use_enriched=False):
+                 roll_n=None, smooth_window=7, use_enriched=False, mtime=0.0):
     """
     Generic band + current-contract computation for any metric.
     roll_n: if set, compute rolling(roll_n).mean() on 'volume' first (by Date order).
     Returns (band, curr_df, active_syms, hist_syms) or None.
     """
-    df = load_enriched(commodity) if use_enriched else load_data(commodity)
+    df = load_enriched(commodity, mtime) if use_enriched else load_data(commodity, mtime)
     dm = df[df["month"] == month].copy()
 
     active_syms, hist_syms = _split_contracts(dm)
@@ -258,7 +264,8 @@ with st.sidebar:
     commodity = st.selectbox("Commodity", list(COMMODITIES.keys()),
                              format_func=lambda x: COMMODITIES[x][1])
 
-    df_sidebar      = load_data(commodity)
+    mt              = _mtime(commodity)
+    df_sidebar      = load_data(commodity, mt)
     avail_months    = sorted(df_sidebar["month"].unique())
     default_idx     = avail_months.index("N") if "N" in avail_months else 0
     selected_month  = st.selectbox("Contract Month", avail_months, index=default_idx,
@@ -310,7 +317,7 @@ tab_oi, tab_vol = st.tabs(["OI Progression", "Volume"])
 # TAB 1 — OI PROGRESSION
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_oi:
-    res = compute_band(commodity, selected_month, hist_range, "open_interest")
+    res = compute_band(commodity, selected_month, hist_range, "open_interest", mtime=mt)
     if res is None:
         st.error("No data available.")
         st.stop()
@@ -326,8 +333,19 @@ with tab_oi:
         curr_peak = curr_df["open_interest"].max()
         if curr_peak > 0:
             curr_df["open_interest"] = curr_df["open_interest"] / curr_peak * 100
-        res2 = compute_band(commodity, selected_month, hist_range, "open_interest")
-        if res2: band = res2[0]
+        hist_norm = df_month[
+            df_month["ice_symbol"].isin(hist_syms) &
+            df_month["year"].between(hist_range[0], hist_range[1])
+        ]
+        band = (
+            hist_norm.groupby("days_to_expiry")["open_interest"]
+            .agg(hist_min="min", hist_max="max", hist_mean="mean",
+                 hist_q25=lambda x: x.quantile(0.25),
+                 hist_q75=lambda x: x.quantile(0.75))
+            .reset_index().sort_values("days_to_expiry")
+        )
+        for c in ["hist_min", "hist_max", "hist_mean", "hist_q25", "hist_q75"]:
+            band[c] = band[c].rolling(7, center=True, min_periods=1).mean()
 
     oi_fmt  = ".1f" if normalize else ",.0f"
     oi_unit = "% of peak" if normalize else "contracts"
@@ -369,7 +387,7 @@ with tab_oi:
     st.markdown("---")
     st.markdown(f"### {COMMODITIES[commodity][1]} — 4 Active Contracts")
 
-    df_all     = load_data(commodity)
+    df_all     = load_data(commodity, mt)
     ltd_all    = df_all.groupby("ice_symbol")[["LTD","month"]].first().reset_index()
     active_all = ltd_all[ltd_all["LTD"] >= today].sort_values("LTD").head(4)
     quad_syms  = list(active_all["ice_symbol"])
@@ -381,7 +399,7 @@ with tab_oi:
 
     for idx, (sym_q, m_q) in enumerate(zip(quad_syms, quad_months)):
         r, cl = idx//2+1, idx%2+1
-        res_q = compute_band(commodity, m_q, hist_range, "open_interest")
+        res_q = compute_band(commodity, m_q, hist_range, "open_interest", mtime=mt)
         if res_q is None: continue
         b_q = res_q[0]
         c_q = df_all[df_all["ice_symbol"] == sym_q].sort_values("Date").copy()
@@ -404,10 +422,10 @@ with tab_oi:
     st.markdown(f"### {current_contract} — Share of Total {commodity} Market OI (%)")
     st.caption("Contract OI / sum of all active contracts OI on that date.")
 
-    res_sh = compute_band(commodity, selected_month, hist_range, "oi_share_pct", use_enriched=True)
+    res_sh = compute_band(commodity, selected_month, hist_range, "oi_share_pct", use_enriched=True, mtime=mt)
     if res_sh:
         b_sh, _, _, _ = res_sh
-        df_enr  = load_enriched(commodity)
+        df_enr  = load_enriched(commodity, mt)
         c_sh    = df_enr[df_enr["ice_symbol"] == current_contract].sort_values("Date").copy()
         lat_sh  = c_sh.iloc[-1]
         dte_sh  = int(lat_sh["days_to_expiry"])
@@ -450,14 +468,14 @@ with tab_vol:
                        help="Applied to daily volume before plotting progression")
 
     month_name = MONTH_NAMES.get(selected_month, selected_month)
-    df_enr     = load_enriched(commodity)
+    df_enr     = load_enriched(commodity, mt)
     df_enr_m   = df_enr[df_enr["month"] == selected_month].copy()
 
     # ── Chart 1: Volume / OI Ratio ────────────────────────────────────────────
     st.markdown("#### Volume / OI Ratio")
     st.caption("Daily volume divided by open interest — measures turnover rate / speculative activity.")
 
-    res_vr = compute_band(commodity, selected_month, hist_range, "vol_oi_ratio", use_enriched=True)
+    res_vr = compute_band(commodity, selected_month, hist_range, "vol_oi_ratio", use_enriched=True, mtime=mt)
     if res_vr:
         b_vr, _, _, _ = res_vr
         c_vr  = df_enr[df_enr["ice_symbol"] == current_contract].sort_values("Date").copy()
@@ -487,7 +505,7 @@ with tab_vol:
     st.markdown("#### Volume Market Share (%)")
     st.caption("Contract daily volume as % of total commodity volume on that date.")
 
-    res_vs = compute_band(commodity, selected_month, hist_range, "vol_share_pct", use_enriched=True)
+    res_vs = compute_band(commodity, selected_month, hist_range, "vol_share_pct", use_enriched=True, mtime=mt)
     if res_vs:
         b_vs, _, _, _ = res_vs
         c_vs  = df_enr[df_enr["ice_symbol"] == current_contract].sort_values("Date").copy()
@@ -518,7 +536,7 @@ with tab_vol:
     st.caption(f"{roll_n}-day rolling mean of daily volume, aligned by days to expiry.")
 
     res_rv = compute_band(commodity, selected_month, hist_range,
-                          metric_col="volume", roll_n=roll_n)
+                          metric_col="volume", roll_n=roll_n, mtime=mt)
     if res_rv:
         b_rv, c_rv_base, _, _ = res_rv
 
