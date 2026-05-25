@@ -291,8 +291,9 @@ with st.sidebar:
     max_dte      = int(df_month["days_to_expiry"].max())
     max_dte_r    = (max_dte // 10) * 10
     dte_opts_rev = list(range(max_dte_r, -1, -10))
+    default_upper = 300 if 300 in dte_opts_rev else dte_opts_rev[0]
     dte_sel      = st.select_slider("Days to Expiry Range", options=dte_opts_rev,
-                                    value=(dte_opts_rev[0], dte_opts_rev[-1]))
+                                    value=(default_upper, dte_opts_rev[-1]))
     dte_range    = [dte_sel[0], dte_sel[1]]   # [high DTE, low DTE] — chart is reversed
 
     st.markdown("---")
@@ -409,7 +410,7 @@ with tab_oi:
                        font=dict(color=C["font"], family="Inter, sans-serif"),
                        showlegend=False, margin=dict(l=50,r=30,t=60,b=50))
     for i in range(1,5):
-        fig4.update_xaxes(autorange="reversed", showgrid=True, gridcolor=C["grid"],
+        fig4.update_xaxes(range=[dte_range[0], dte_range[1]], showgrid=True, gridcolor=C["grid"],
                           tickfont=dict(size=10), zeroline=False,
                           row=(i-1)//2+1, col=(i-1)%2+1)
         fig4.update_yaxes(showgrid=True, gridcolor=C["grid"], tickformat=",",
