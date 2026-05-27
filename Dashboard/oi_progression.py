@@ -116,10 +116,10 @@ def _densify_by_dte(hist_df, metric_col):
 
 
 def _normalize_oi(commodity, month, hist_year_range, current_sym, mtime=0.0):
-    """Returns (band, curr_df, peak_dte, anchor_estimated) with OI normalized
-    as % of each contract's own value at the DTE where the historical average
-    OI peaks. If the current contract has not yet reached that DTE, falls back
-    to historical avg at peak DTE and sets anchor_estimated=True."""
+    """Returns (band, curr_df) with every contract (historical + current)
+    divided by the SAME constant: the historical average OI at the DTE where
+    that average peaks. Y-axis reads as '% of typical peak'. Lines can and
+    will go above 100% in big years."""
     df = load_data(commodity, mtime)
     dm = df[df["month"] == month].copy()
     active_syms, hist_syms = _split_contracts(dm)
@@ -134,40 +134,18 @@ def _normalize_oi(commodity, month, hist_year_range, current_sym, mtime=0.0):
     avg_curve = hist_dense_pre.groupby("days_to_expiry")["open_interest"].mean()
     if avg_curve.empty:
         return None
-    peak_dte = int(avg_curve.idxmax())
-    anchors = (hist_dense_pre[hist_dense_pre["days_to_expiry"] == peak_dte]
-               .set_index("ice_symbol")["open_interest"])
+    divisor = float(avg_curve.max())
+    if divisor <= 0:
+        return None
 
-    for sym, grp in dm[dm["ice_symbol"].isin(hist_syms)].groupby("ice_symbol"):
-        anchor = anchors.get(sym)
-        if anchor is None or pd.isna(anchor) or anchor <= 0:
-            anchor = grp["open_interest"].max()
-        if anchor > 0:
-            dm.loc[grp.index, "open_interest"] = grp["open_interest"] / anchor * 100
+    dm.loc[dm["ice_symbol"].isin(hist_syms), "open_interest"] = (
+        dm.loc[dm["ice_symbol"].isin(hist_syms), "open_interest"] / divisor * 100
+    )
 
     curr_df = dm[dm["ice_symbol"] == current_sym].sort_values("Date").copy()
     if curr_df.empty:
         return None
-    curr_dense = _densify_by_dte(curr_df.assign(ice_symbol=current_sym), "open_interest")
-    match = curr_dense[curr_dense["days_to_expiry"] == peak_dte]
-    curr_anchor = match["open_interest"].iloc[0] if not match.empty else None
-    anchor_estimated = False
-    if curr_anchor is None or pd.isna(curr_anchor) or curr_anchor <= 0:
-        # Contract hasn't reached anchor DTE yet — project the peak via the
-        # median ratio of curr/hist_mean over the last 30 observed sessions.
-        # projected_peak = median_ratio * hist_mean_at_peak_dte
-        anchor_estimated = True
-        recent = curr_df.sort_values("Date").tail(30).copy()
-        recent["_hist_mean"] = recent["days_to_expiry"].map(avg_curve)
-        recent_valid = recent[(recent["_hist_mean"] > 0) & (recent["open_interest"] > 0)]
-        avg_at_peak = avg_curve.get(peak_dte)
-        if not recent_valid.empty and avg_at_peak and avg_at_peak > 0:
-            median_ratio = (recent_valid["open_interest"] / recent_valid["_hist_mean"]).median()
-            curr_anchor = median_ratio * avg_at_peak
-        else:
-            curr_anchor = avg_at_peak if (avg_at_peak and avg_at_peak > 0) else curr_df["open_interest"].max()
-    if curr_anchor > 0:
-        curr_df["open_interest"] = curr_df["open_interest"] / curr_anchor * 100
+    curr_df["open_interest"] = curr_df["open_interest"] / divisor * 100
 
     hist_norm = dm[
         dm["ice_symbol"].isin(hist_syms) &
@@ -183,7 +161,7 @@ def _normalize_oi(commodity, month, hist_year_range, current_sym, mtime=0.0):
     )
     for c in ["hist_mean", "hist_q25", "hist_q75"]:
         band[c] = band[c].rolling(7, center=True, min_periods=1).mean()
-    return band, curr_df, peak_dte, anchor_estimated
+    return band, curr_df
 
 
 def compute_band(commodity, month, hist_year_range, metric_col,
@@ -391,7 +369,7 @@ with st.sidebar:
 
     st.markdown("---")
     show_individual = st.toggle("Show individual years", value=False)
-    normalize       = st.toggle("Normalize OI (% of peak)", value=False)
+    normalize       = st.toggle("Normalize OI (% of typical peak)", value=False)
 
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
@@ -419,15 +397,13 @@ with tab_oi:
     band, curr_df, _, _ = res
     curr_df = df_month[df_month["ice_symbol"] == current_contract].sort_values("Date").copy()
 
-    main_anchor_estimated = False
-    main_peak_dte = None
     if normalize:
         res_n = _normalize_oi(commodity, selected_month, hist_range, current_contract, mt)
         if res_n is not None:
-            band, curr_df, main_peak_dte, main_anchor_estimated = res_n
+            band, curr_df = res_n
 
     oi_fmt  = ".1f" if normalize else ",.0f"
-    oi_unit = "% of peak" if normalize else "contracts"
+    oi_unit = "% of typical peak" if normalize else "contracts"
 
     latest     = curr_df.iloc[-1]
     dte_now    = int(latest["days_to_expiry"])
@@ -461,12 +437,10 @@ with tab_oi:
         height=540,
     )
     st.plotly_chart(fig_oi, use_container_width=True)
-    if normalize and main_anchor_estimated:
+    if normalize:
         st.caption(
-            f"Note: {current_contract} has not yet reached the historical anchor "
-            f"DTE ({main_peak_dte}). Its peak is **projected** via the median "
-            f"ratio of curr/historical-mean over the last 30 sessions × the "
-            f"historical mean at peak DTE."
+            "OI expressed as % of the historical average peak OI. Lines above "
+            "100% indicate bigger-than-typical years; below 100% indicate smaller years."
         )
 
     # ── 2x2 Active contracts ──────────────────────────────────────────────────
@@ -480,33 +454,29 @@ with tab_oi:
     quad_months= list(active_all["month"])
 
     quad_fmt = ".1f" if normalize else ",.0f"
-    quad_results = []  # (sym, month, band, curr_df, estimated_flag)
+    quad_results = []  # (sym, month, band, curr_df)
     for sym_q, m_q in zip(quad_syms, quad_months):
         if normalize:
             res_q = _normalize_oi(commodity, m_q, hist_range, sym_q, mt)
             if res_q is None:
-                quad_results.append((sym_q, m_q, None, None, False))
+                quad_results.append((sym_q, m_q, None, None))
                 continue
-            b_q, c_q, _, est_q = res_q
-            quad_results.append((sym_q, m_q, b_q, c_q, est_q))
+            b_q, c_q = res_q
+            quad_results.append((sym_q, m_q, b_q, c_q))
         else:
             res_q = compute_band(commodity, m_q, hist_range, "open_interest", mtime=mt)
             if res_q is None:
-                quad_results.append((sym_q, m_q, None, None, False))
+                quad_results.append((sym_q, m_q, None, None))
                 continue
             b_q = res_q[0]
             c_q = df_all[df_all["ice_symbol"] == sym_q].sort_values("Date").copy()
-            quad_results.append((sym_q, m_q, b_q, c_q, False))
+            quad_results.append((sym_q, m_q, b_q, c_q))
 
-    subplot_titles = [
-        f"{s}  ({MONTH_NAMES.get(m, m)})" + (" *" if est else "")
-        for s, m, _, _, est in quad_results
-    ]
     fig4 = make_subplots(rows=2, cols=2,
-        subplot_titles=subplot_titles,
+        subplot_titles=[f"{s}  ({MONTH_NAMES.get(m, m)})" for s, m, _, _ in quad_results],
         horizontal_spacing=0.08, vertical_spacing=0.14)
 
-    for idx, (sym_q, m_q, b_q, c_q, _) in enumerate(quad_results):
+    for idx, (sym_q, m_q, b_q, c_q) in enumerate(quad_results):
         if b_q is None:
             continue
         r, cl = idx//2+1, idx%2+1
@@ -525,12 +495,10 @@ with tab_oi:
                           tickfont=dict(size=10), zeroline=False,
                           row=(i-1)//2+1, col=(i-1)%2+1)
     st.plotly_chart(fig4, use_container_width=True)
-    if normalize and any(est for *_, est in quad_results):
-        est_syms = ", ".join(s for s, _, _, _, est in quad_results if est)
+    if normalize:
         st.caption(
-            f"* {est_syms} have not yet reached the historical anchor DTE. "
-            f"Their peak is **projected** via the median ratio of curr/historical-mean "
-            f"over the last 30 sessions × the historical mean at peak DTE."
+            "Each contract divided by the historical average peak OI for its month. "
+            "Lines above 100% = bigger-than-typical year; below 100% = smaller."
         )
 
     # ── OI Market Share ───────────────────────────────────────────────────────
