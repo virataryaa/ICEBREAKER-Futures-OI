@@ -130,6 +130,9 @@ def compute_band(commodity, month, hist_year_range, metric_col,
              hist_q75=lambda x: x.quantile(0.75))
         .reset_index().sort_values("days_to_expiry")
     )
+    for c in ["hist_min", "hist_max", "hist_mean", "hist_q25", "hist_q75"]:
+        band[c] = band[c].rolling(7, center=True, min_periods=1).mean()
+
     curr_df = dm[dm["ice_symbol"] == active_syms[0]].sort_values("Date").copy()
     return band, curr_df, active_syms, hist_syms
 
@@ -168,7 +171,8 @@ def build_chart(band, curr_df, metric_col, current_sym,
     # Individual years
     if show_individual and hist_df is not None and ind_metric:
         for sym, grp in hist_df.groupby("ice_symbol"):
-            grp = grp.sort_values("days_to_expiry")
+            grp = grp.sort_values("days_to_expiry").copy()
+            grp[ind_metric] = grp[ind_metric].rolling(7, center=True, min_periods=1).mean()
             fig.add_trace(go.Scatter(x=grp["days_to_expiry"], y=grp[ind_metric],
                 mode="lines", line=dict(width=0.9, color=C["individual"]),
                 name=sym, showlegend=True,
@@ -342,6 +346,8 @@ with tab_oi:
                  hist_q75=lambda x: x.quantile(0.75))
             .reset_index().sort_values("days_to_expiry")
         )
+        for c in ["hist_min", "hist_max", "hist_mean", "hist_q25", "hist_q75"]:
+            band[c] = band[c].rolling(7, center=True, min_periods=1).mean()
 
     oi_fmt  = ".1f" if normalize else ",.0f"
     oi_unit = "% of peak" if normalize else "contracts"
