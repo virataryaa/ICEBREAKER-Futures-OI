@@ -96,7 +96,7 @@ def _split_contracts(dm):
 
 
 def compute_band(commodity, month, hist_year_range, metric_col,
-                 roll_n=None, smooth_window=7, use_enriched=False, mtime=0.0):
+                 roll_n=None, use_enriched=False, mtime=0.0):
     """
     Generic band + current-contract computation for any metric.
     roll_n: if set, compute rolling(roll_n).mean() on 'volume' first (by Date order).
@@ -130,9 +130,6 @@ def compute_band(commodity, month, hist_year_range, metric_col,
              hist_q75=lambda x: x.quantile(0.75))
         .reset_index().sort_values("days_to_expiry")
     )
-    for c in ["hist_min","hist_max","hist_mean","hist_q25","hist_q75"]:
-        band[c] = band[c].rolling(smooth_window, center=True, min_periods=1).mean()
-
     curr_df = dm[dm["ice_symbol"] == active_syms[0]].sort_values("Date").copy()
     return band, curr_df, active_syms, hist_syms
 
@@ -345,8 +342,6 @@ with tab_oi:
                  hist_q75=lambda x: x.quantile(0.75))
             .reset_index().sort_values("days_to_expiry")
         )
-        for c in ["hist_min", "hist_max", "hist_mean", "hist_q25", "hist_q75"]:
-            band[c] = band[c].rolling(7, center=True, min_periods=1).mean()
 
     oi_fmt  = ".1f" if normalize else ",.0f"
     oi_unit = "% of peak" if normalize else "contracts"
