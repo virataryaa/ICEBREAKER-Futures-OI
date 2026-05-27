@@ -349,13 +349,33 @@ with tab_oi:
     curr_df = df_month[df_month["ice_symbol"] == current_contract].sort_values("Date").copy()
 
     if normalize:
+        # Anchor DTE = DTE where the historical average OI peaks.
+        # Each contract is normalized by its own OI at that DTE (not its own peak).
+        hist_raw = df_month[
+            df_month["ice_symbol"].isin(hist_syms) &
+            df_month["year"].between(hist_range[0], hist_range[1])
+        ]
+        hist_dense_pre = _densify_by_dte(hist_raw, "open_interest")
+        avg_curve = hist_dense_pre.groupby("days_to_expiry")["open_interest"].mean()
+        peak_dte = int(avg_curve.idxmax())
+        anchors = (hist_dense_pre[hist_dense_pre["days_to_expiry"] == peak_dte]
+                   .set_index("ice_symbol")["open_interest"])
+
         for sym, grp in df_month[df_month["ice_symbol"].isin(hist_syms)].groupby("ice_symbol"):
-            peak = grp["open_interest"].max()
-            if peak > 0:
-                df_month.loc[grp.index, "open_interest"] = grp["open_interest"] / peak * 100
-        curr_peak = curr_df["open_interest"].max()
-        if curr_peak > 0:
-            curr_df["open_interest"] = curr_df["open_interest"] / curr_peak * 100
+            anchor = anchors.get(sym)
+            if anchor is None or pd.isna(anchor) or anchor <= 0:
+                anchor = grp["open_interest"].max()
+            if anchor > 0:
+                df_month.loc[grp.index, "open_interest"] = grp["open_interest"] / anchor * 100
+
+        curr_dense = _densify_by_dte(curr_df.assign(ice_symbol=current_contract), "open_interest")
+        match = curr_dense[curr_dense["days_to_expiry"] == peak_dte]
+        curr_anchor = match["open_interest"].iloc[0] if not match.empty else None
+        if curr_anchor is None or pd.isna(curr_anchor) or curr_anchor <= 0:
+            curr_anchor = curr_df["open_interest"].max()
+        if curr_anchor > 0:
+            curr_df["open_interest"] = curr_df["open_interest"] / curr_anchor * 100
+
         hist_norm = df_month[
             df_month["ice_symbol"].isin(hist_syms) &
             df_month["year"].between(hist_range[0], hist_range[1])
