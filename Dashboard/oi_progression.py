@@ -228,10 +228,10 @@ def build_chart(band, curr_df, metric_col, current_sym,
                    ticksuffix=y_suffix, tickfont=dict(size=11, color=C["font"])),
         plot_bgcolor=C["bg"], paper_bgcolor=C["bg"],
         font=dict(color=C["font"], family="Inter, sans-serif"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
+        legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="left", x=0,
                     bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
         hovermode="x unified", height=height,
-        margin=dict(l=70, r=30, t=60, b=55),
+        margin=dict(l=70, r=30, t=60, b=120),
     )
     return fig
 
