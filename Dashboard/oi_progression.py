@@ -115,6 +115,7 @@ def _densify_by_dte(hist_df, metric_col):
     return pd.concat(pieces, ignore_index=True) if pieces else hist_df
 
 
+@st.cache_data(max_entries=200, show_spinner=False)
 def _normalize_oi(commodity, month, hist_year_range, current_sym, mtime=0.0):
     """Returns (band, curr_df) with every contract (historical + current)
     divided by the SAME constant: the historical average OI at the DTE where
@@ -164,6 +165,7 @@ def _normalize_oi(commodity, month, hist_year_range, current_sym, mtime=0.0):
     return band, curr_df
 
 
+@st.cache_data(max_entries=200, show_spinner=False)
 def compute_band(commodity, month, hist_year_range, metric_col,
                  roll_n=None, use_enriched=False, mtime=0.0):
     """
