@@ -115,6 +115,63 @@ def _densify_by_dte(hist_df, metric_col):
     return pd.concat(pieces, ignore_index=True) if pieces else hist_df
 
 
+def _normalize_oi(commodity, month, hist_year_range, current_sym, mtime=0.0):
+    """Returns (band, curr_df) with OI normalized as % of each contract's
+    own value at the DTE where the historical average OI peaks.
+    Falls back to the contract's own max if it has no value at that DTE."""
+    df = load_data(commodity, mtime)
+    dm = df[df["month"] == month].copy()
+    active_syms, hist_syms = _split_contracts(dm)
+    if not active_syms or not hist_syms:
+        return None
+
+    hist_raw = dm[
+        dm["ice_symbol"].isin(hist_syms) &
+        dm["year"].between(hist_year_range[0], hist_year_range[1])
+    ]
+    hist_dense_pre = _densify_by_dte(hist_raw, "open_interest")
+    avg_curve = hist_dense_pre.groupby("days_to_expiry")["open_interest"].mean()
+    if avg_curve.empty:
+        return None
+    peak_dte = int(avg_curve.idxmax())
+    anchors = (hist_dense_pre[hist_dense_pre["days_to_expiry"] == peak_dte]
+               .set_index("ice_symbol")["open_interest"])
+
+    for sym, grp in dm[dm["ice_symbol"].isin(hist_syms)].groupby("ice_symbol"):
+        anchor = anchors.get(sym)
+        if anchor is None or pd.isna(anchor) or anchor <= 0:
+            anchor = grp["open_interest"].max()
+        if anchor > 0:
+            dm.loc[grp.index, "open_interest"] = grp["open_interest"] / anchor * 100
+
+    curr_df = dm[dm["ice_symbol"] == current_sym].sort_values("Date").copy()
+    if curr_df.empty:
+        return None
+    curr_dense = _densify_by_dte(curr_df.assign(ice_symbol=current_sym), "open_interest")
+    match = curr_dense[curr_dense["days_to_expiry"] == peak_dte]
+    curr_anchor = match["open_interest"].iloc[0] if not match.empty else None
+    if curr_anchor is None or pd.isna(curr_anchor) or curr_anchor <= 0:
+        curr_anchor = curr_df["open_interest"].max()
+    if curr_anchor > 0:
+        curr_df["open_interest"] = curr_df["open_interest"] / curr_anchor * 100
+
+    hist_norm = dm[
+        dm["ice_symbol"].isin(hist_syms) &
+        dm["year"].between(hist_year_range[0], hist_year_range[1])
+    ]
+    hist_norm_dense = _densify_by_dte(hist_norm, "open_interest")
+    band = (
+        hist_norm_dense.groupby("days_to_expiry")["open_interest"]
+        .agg(hist_min="min", hist_max="max", hist_mean="mean",
+             hist_q25=lambda x: x.quantile(0.25),
+             hist_q75=lambda x: x.quantile(0.75))
+        .reset_index().sort_values("days_to_expiry")
+    )
+    for c in ["hist_mean", "hist_q25", "hist_q75"]:
+        band[c] = band[c].rolling(7, center=True, min_periods=1).mean()
+    return band, curr_df
+
+
 def compute_band(commodity, month, hist_year_range, metric_col,
                  roll_n=None, use_enriched=False, mtime=0.0):
     """
@@ -349,47 +406,9 @@ with tab_oi:
     curr_df = df_month[df_month["ice_symbol"] == current_contract].sort_values("Date").copy()
 
     if normalize:
-        # Anchor DTE = DTE where the historical average OI peaks.
-        # Each contract is normalized by its own OI at that DTE (not its own peak).
-        hist_raw = df_month[
-            df_month["ice_symbol"].isin(hist_syms) &
-            df_month["year"].between(hist_range[0], hist_range[1])
-        ]
-        hist_dense_pre = _densify_by_dte(hist_raw, "open_interest")
-        avg_curve = hist_dense_pre.groupby("days_to_expiry")["open_interest"].mean()
-        peak_dte = int(avg_curve.idxmax())
-        anchors = (hist_dense_pre[hist_dense_pre["days_to_expiry"] == peak_dte]
-                   .set_index("ice_symbol")["open_interest"])
-
-        for sym, grp in df_month[df_month["ice_symbol"].isin(hist_syms)].groupby("ice_symbol"):
-            anchor = anchors.get(sym)
-            if anchor is None or pd.isna(anchor) or anchor <= 0:
-                anchor = grp["open_interest"].max()
-            if anchor > 0:
-                df_month.loc[grp.index, "open_interest"] = grp["open_interest"] / anchor * 100
-
-        curr_dense = _densify_by_dte(curr_df.assign(ice_symbol=current_contract), "open_interest")
-        match = curr_dense[curr_dense["days_to_expiry"] == peak_dte]
-        curr_anchor = match["open_interest"].iloc[0] if not match.empty else None
-        if curr_anchor is None or pd.isna(curr_anchor) or curr_anchor <= 0:
-            curr_anchor = curr_df["open_interest"].max()
-        if curr_anchor > 0:
-            curr_df["open_interest"] = curr_df["open_interest"] / curr_anchor * 100
-
-        hist_norm = df_month[
-            df_month["ice_symbol"].isin(hist_syms) &
-            df_month["year"].between(hist_range[0], hist_range[1])
-        ]
-        hist_norm_dense = _densify_by_dte(hist_norm, "open_interest")
-        band = (
-            hist_norm_dense.groupby("days_to_expiry")["open_interest"]
-            .agg(hist_min="min", hist_max="max", hist_mean="mean",
-                 hist_q25=lambda x: x.quantile(0.25),
-                 hist_q75=lambda x: x.quantile(0.75))
-            .reset_index().sort_values("days_to_expiry")
-        )
-        for c in ["hist_mean", "hist_q25", "hist_q75"]:
-            band[c] = band[c].rolling(7, center=True, min_periods=1).mean()
+        res_n = _normalize_oi(commodity, selected_month, hist_range, current_contract, mt)
+        if res_n is not None:
+            band, curr_df = res_n
 
     oi_fmt  = ".1f" if normalize else ",.0f"
     oi_unit = "% of peak" if normalize else "contracts"
@@ -441,13 +460,19 @@ with tab_oi:
         subplot_titles=[f"{s}  ({MONTH_NAMES.get(m,m)})" for s,m in zip(quad_syms,quad_months)],
         horizontal_spacing=0.08, vertical_spacing=0.14)
 
+    quad_fmt = ".1f" if normalize else ",.0f"
     for idx, (sym_q, m_q) in enumerate(zip(quad_syms, quad_months)):
         r, cl = idx//2+1, idx%2+1
-        res_q = compute_band(commodity, m_q, hist_range, "open_interest", mtime=mt)
-        if res_q is None: continue
-        b_q = res_q[0]
-        c_q = df_all[df_all["ice_symbol"] == sym_q].sort_values("Date").copy()
-        add_oi_traces(fig4, b_q, c_q, sym_q, ",.0f", row=r, col=cl, show_legend=False)
+        if normalize:
+            res_q = _normalize_oi(commodity, m_q, hist_range, sym_q, mt)
+            if res_q is None: continue
+            b_q, c_q = res_q
+        else:
+            res_q = compute_band(commodity, m_q, hist_range, "open_interest", mtime=mt)
+            if res_q is None: continue
+            b_q = res_q[0]
+            c_q = df_all[df_all["ice_symbol"] == sym_q].sort_values("Date").copy()
+        add_oi_traces(fig4, b_q, c_q, sym_q, quad_fmt, row=r, col=cl, show_legend=False)
 
     fig4.update_layout(height=720, plot_bgcolor=C["bg"], paper_bgcolor=C["bg"],
                        font=dict(color=C["font"], family="Inter, sans-serif"),
@@ -456,7 +481,9 @@ with tab_oi:
         fig4.update_xaxes(range=[dte_range[0], dte_range[1]], showgrid=True, gridcolor=C["grid"],
                           tickfont=dict(size=10), zeroline=False,
                           row=(i-1)//2+1, col=(i-1)%2+1)
-        fig4.update_yaxes(showgrid=True, gridcolor=C["grid"], tickformat=",",
+        fig4.update_yaxes(showgrid=True, gridcolor=C["grid"],
+                          tickformat=".1f" if normalize else ",",
+                          ticksuffix="%" if normalize else "",
                           tickfont=dict(size=10), zeroline=False,
                           row=(i-1)//2+1, col=(i-1)%2+1)
     st.plotly_chart(fig4, use_container_width=True)
