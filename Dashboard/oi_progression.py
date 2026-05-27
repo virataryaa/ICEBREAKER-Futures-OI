@@ -130,7 +130,7 @@ def compute_band(commodity, month, hist_year_range, metric_col,
              hist_q75=lambda x: x.quantile(0.75))
         .reset_index().sort_values("days_to_expiry")
     )
-    for c in ["hist_min", "hist_max", "hist_mean", "hist_q25", "hist_q75"]:
+    for c in ["hist_mean", "hist_q25", "hist_q75"]:
         band[c] = band[c].rolling(7, center=True, min_periods=1).mean()
 
     curr_df = dm[dm["ice_symbol"] == active_syms[0]].sort_values("Date").copy()
@@ -346,7 +346,7 @@ with tab_oi:
                  hist_q75=lambda x: x.quantile(0.75))
             .reset_index().sort_values("days_to_expiry")
         )
-        for c in ["hist_min", "hist_max", "hist_mean", "hist_q25", "hist_q75"]:
+        for c in ["hist_mean", "hist_q25", "hist_q75"]:
             band[c] = band[c].rolling(7, center=True, min_periods=1).mean()
 
     oi_fmt  = ".1f" if normalize else ",.0f"
