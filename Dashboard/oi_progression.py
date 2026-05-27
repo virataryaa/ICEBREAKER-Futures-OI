@@ -95,6 +95,26 @@ def _split_contracts(dm):
             ltd[ltd <  today].sort_values().index.tolist())
 
 
+def _densify_by_dte(hist_df, metric_col):
+    """Reindex each contract onto a continuous integer DTE grid and
+    linearly interpolate gaps (weekends/holidays). Removes the sparsity
+    teeth artifacts that show up when only some contracts have a data
+    point at a given integer DTE."""
+    pieces = []
+    for sym, grp in hist_df.groupby("ice_symbol"):
+        g = (grp[["days_to_expiry", metric_col]]
+             .drop_duplicates("days_to_expiry")
+             .set_index("days_to_expiry")
+             .sort_index())
+        if len(g) < 2:
+            continue
+        full_idx = pd.RangeIndex(int(g.index.min()), int(g.index.max()) + 1)
+        g = g.reindex(full_idx).interpolate(method="linear")
+        g["ice_symbol"] = sym
+        pieces.append(g.rename_axis("days_to_expiry").reset_index())
+    return pd.concat(pieces, ignore_index=True) if pieces else hist_df
+
+
 def compute_band(commodity, month, hist_year_range, metric_col,
                  roll_n=None, use_enriched=False, mtime=0.0):
     """
@@ -123,15 +143,15 @@ def compute_band(commodity, month, hist_year_range, metric_col,
         dm["year"].between(hist_year_range[0], hist_year_range[1])
     ]
 
+    hist_dense = _densify_by_dte(hist_df, metric_col)
+
     band = (
-        hist_df.groupby("days_to_expiry")[metric_col]
+        hist_dense.groupby("days_to_expiry")[metric_col]
         .agg(hist_min="min", hist_max="max", hist_mean="mean",
              hist_q25=lambda x: x.quantile(0.25),
              hist_q75=lambda x: x.quantile(0.75))
         .reset_index().sort_values("days_to_expiry")
     )
-    for c in ["hist_min", "hist_max"]:
-        band[c] = band[c].rolling(3, center=True, min_periods=1).mean()
     for c in ["hist_mean", "hist_q25", "hist_q75"]:
         band[c] = band[c].rolling(7, center=True, min_periods=1).mean()
 
@@ -173,8 +193,7 @@ def build_chart(band, curr_df, metric_col, current_sym,
     # Individual years
     if show_individual and hist_df is not None and ind_metric:
         for sym, grp in hist_df.groupby("ice_symbol"):
-            grp = grp.sort_values("days_to_expiry").copy()
-            grp[ind_metric] = grp[ind_metric].rolling(7, center=True, min_periods=1).mean()
+            grp = grp.sort_values("days_to_expiry")
             fig.add_trace(go.Scatter(x=grp["days_to_expiry"], y=grp[ind_metric],
                 mode="lines", line=dict(width=0.9, color=C["individual"]),
                 name=sym, showlegend=True,
@@ -341,15 +360,14 @@ with tab_oi:
             df_month["ice_symbol"].isin(hist_syms) &
             df_month["year"].between(hist_range[0], hist_range[1])
         ]
+        hist_norm_dense = _densify_by_dte(hist_norm, "open_interest")
         band = (
-            hist_norm.groupby("days_to_expiry")["open_interest"]
+            hist_norm_dense.groupby("days_to_expiry")["open_interest"]
             .agg(hist_min="min", hist_max="max", hist_mean="mean",
                  hist_q25=lambda x: x.quantile(0.25),
                  hist_q75=lambda x: x.quantile(0.75))
             .reset_index().sort_values("days_to_expiry")
         )
-        for c in ["hist_min", "hist_max"]:
-            band[c] = band[c].rolling(3, center=True, min_periods=1).mean()
         for c in ["hist_mean", "hist_q25", "hist_q75"]:
             band[c] = band[c].rolling(7, center=True, min_periods=1).mean()
 
