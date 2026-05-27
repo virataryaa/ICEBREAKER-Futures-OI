@@ -153,12 +153,19 @@ def _normalize_oi(commodity, month, hist_year_range, current_sym, mtime=0.0):
     curr_anchor = match["open_interest"].iloc[0] if not match.empty else None
     anchor_estimated = False
     if curr_anchor is None or pd.isna(curr_anchor) or curr_anchor <= 0:
-        # Contract hasn't reached anchor DTE yet — use historical avg at that DTE
-        # so curr line shows OI as % of typical peak (comparable to the band).
+        # Contract hasn't reached anchor DTE yet — project the peak via the
+        # median ratio of curr/hist_mean over the last 30 observed sessions.
+        # projected_peak = median_ratio * hist_mean_at_peak_dte
         anchor_estimated = True
-        curr_anchor = avg_curve.get(peak_dte)
-        if curr_anchor is None or pd.isna(curr_anchor) or curr_anchor <= 0:
-            curr_anchor = curr_df["open_interest"].max()
+        recent = curr_df.sort_values("Date").tail(30).copy()
+        recent["_hist_mean"] = recent["days_to_expiry"].map(avg_curve)
+        recent_valid = recent[(recent["_hist_mean"] > 0) & (recent["open_interest"] > 0)]
+        avg_at_peak = avg_curve.get(peak_dte)
+        if not recent_valid.empty and avg_at_peak and avg_at_peak > 0:
+            median_ratio = (recent_valid["open_interest"] / recent_valid["_hist_mean"]).median()
+            curr_anchor = median_ratio * avg_at_peak
+        else:
+            curr_anchor = avg_at_peak if (avg_at_peak and avg_at_peak > 0) else curr_df["open_interest"].max()
     if curr_anchor > 0:
         curr_df["open_interest"] = curr_df["open_interest"] / curr_anchor * 100
 
@@ -457,8 +464,9 @@ with tab_oi:
     if normalize and main_anchor_estimated:
         st.caption(
             f"Note: {current_contract} has not yet reached the historical anchor "
-            f"DTE ({main_peak_dte}). Current line is shown as % of the historical "
-            f"average value at that DTE (not its own peak)."
+            f"DTE ({main_peak_dte}). Its peak is **projected** via the median "
+            f"ratio of curr/historical-mean over the last 30 sessions × the "
+            f"historical mean at peak DTE."
         )
 
     # ── 2x2 Active contracts ──────────────────────────────────────────────────
@@ -521,8 +529,8 @@ with tab_oi:
         est_syms = ", ".join(s for s, _, _, _, est in quad_results if est)
         st.caption(
             f"* {est_syms} have not yet reached the historical anchor DTE. "
-            f"Their current line is shown as % of the historical average value "
-            f"at that DTE (not their own peak)."
+            f"Their peak is **projected** via the median ratio of curr/historical-mean "
+            f"over the last 30 sessions × the historical mean at peak DTE."
         )
 
     # ── OI Market Share ───────────────────────────────────────────────────────
