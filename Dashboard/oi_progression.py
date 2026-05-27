@@ -363,13 +363,19 @@ with st.sidebar:
     max_dte_r    = (max_dte // 10) * 10
     dte_opts_rev = list(range(max_dte_r, -1, -10))
     default_upper = 300 if 300 in dte_opts_rev else dte_opts_rev[0]
-    dte_sel      = st.select_slider("Days to Expiry Range", options=dte_opts_rev,
+    dte_sel      = st.select_slider("Days to Expiry Range (Raw)",
+                                    options=dte_opts_rev,
                                     value=(default_upper, dte_opts_rev[-1]))
     dte_range    = [dte_sel[0], dte_sel[1]]   # [high DTE, low DTE] — chart is reversed
 
+    default_norm_upper = 150 if 150 in dte_opts_rev else dte_opts_rev[0]
+    norm_dte_sel = st.select_slider("Days to Expiry Range (Normalized)",
+                                    options=dte_opts_rev,
+                                    value=(default_norm_upper, dte_opts_rev[-1]))
+    norm_dte_range = [norm_dte_sel[0], norm_dte_sel[1]]
+
     st.markdown("---")
     show_individual = st.toggle("Show individual years", value=False)
-    normalize       = st.toggle("Normalize OI (% of typical peak)", value=False)
 
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
@@ -397,14 +403,6 @@ with tab_oi:
     band, curr_df, _, _ = res
     curr_df = df_month[df_month["ice_symbol"] == current_contract].sort_values("Date").copy()
 
-    if normalize:
-        res_n = _normalize_oi(commodity, selected_month, hist_range, current_contract, mt)
-        if res_n is not None:
-            band, curr_df = res_n
-
-    oi_fmt  = ".1f" if normalize else ",.0f"
-    oi_unit = "% of typical peak" if normalize else "contracts"
-
     latest     = curr_df.iloc[-1]
     dte_now    = int(latest["days_to_expiry"])
     latest_oi  = latest["open_interest"]
@@ -418,30 +416,42 @@ with tab_oi:
 
     kpi_row([
         ("Contract",        current_contract),
-        ("Current OI",      f"{latest_oi:,.0f}" if not normalize else f"{latest_oi:.1f}%"),
+        ("Current OI",      f"{latest_oi:,.0f}"),
         ("As of",           lat_date),
         ("Days to Expiry",  str(dte_now)),
-        ("vs Hist Mean",    f"{avg_oi:,.0f}" if not normalize else f"{avg_oi:.1f}%",
-                            f"{pct_vs_avg:+.1f}%"),
+        ("vs Hist Mean",    f"{avg_oi:,.0f}", f"{pct_vs_avg:+.1f}%"),
     ])
 
     hist_df_ind = df_month[df_month["ice_symbol"].isin(hist_syms)].copy() if show_individual else None
-    fig_oi = build_chart(
-        band, curr_df, "open_interest", current_contract,
-        title=f"<b>{commodity} {month_name}</b>  |  Open Interest Progression",
-        y_title=f"Open Interest ({oi_unit})",
-        y_fmt=",.0f" if not normalize else ".1f", y_suffix="",
-        outer_color=C["oi_outer"], inner_color=C["oi_inner"], avg_color=C["oi_avg"],
-        dte_range=dte_range, dte_now=dte_now,
-        show_individual=show_individual, hist_df=hist_df_ind, ind_metric="open_interest",
-        height=540,
-    )
-    st.plotly_chart(fig_oi, use_container_width=True)
-    if normalize:
-        st.caption(
-            "OI expressed as % of the historical average peak OI. Lines above "
-            "100% indicate bigger-than-typical years; below 100% indicate smaller years."
+    col_raw, col_norm = st.columns(2)
+    with col_raw:
+        fig_oi = build_chart(
+            band, curr_df, "open_interest", current_contract,
+            title=f"<b>{commodity} {month_name}</b>  |  Raw OI",
+            y_title="Open Interest (contracts)",
+            y_fmt=",.0f", y_suffix="",
+            outer_color=C["oi_outer"], inner_color=C["oi_inner"], avg_color=C["oi_avg"],
+            dte_range=dte_range, dte_now=dte_now,
+            show_individual=show_individual, hist_df=hist_df_ind, ind_metric="open_interest",
+            height=520,
         )
+        st.plotly_chart(fig_oi, use_container_width=True)
+
+    with col_norm:
+        res_n = _normalize_oi(commodity, selected_month, hist_range, current_contract, mt)
+        if res_n is not None:
+            band_n, curr_n = res_n
+            fig_n = build_chart(
+                band_n, curr_n, "open_interest", current_contract,
+                title=f"<b>{commodity} {month_name}</b>  |  Normalized (% of typical peak)",
+                y_title="Open Interest (% of typical peak)",
+                y_fmt=".1f", y_suffix="%",
+                outer_color=C["oi_outer"], inner_color=C["oi_inner"], avg_color=C["oi_avg"],
+                dte_range=norm_dte_range, dte_now=dte_now,
+                show_individual=False, hist_df=None, ind_metric=None,
+                height=520,
+            )
+            st.plotly_chart(fig_n, use_container_width=True)
 
     # ── 2x2 Active contracts ──────────────────────────────────────────────────
     st.markdown("---")
@@ -453,24 +463,15 @@ with tab_oi:
     quad_syms  = list(active_all["ice_symbol"])
     quad_months= list(active_all["month"])
 
-    quad_fmt = ".1f" if normalize else ",.0f"
     quad_results = []  # (sym, month, band, curr_df)
     for sym_q, m_q in zip(quad_syms, quad_months):
-        if normalize:
-            res_q = _normalize_oi(commodity, m_q, hist_range, sym_q, mt)
-            if res_q is None:
-                quad_results.append((sym_q, m_q, None, None))
-                continue
-            b_q, c_q = res_q
-            quad_results.append((sym_q, m_q, b_q, c_q))
-        else:
-            res_q = compute_band(commodity, m_q, hist_range, "open_interest", mtime=mt)
-            if res_q is None:
-                quad_results.append((sym_q, m_q, None, None))
-                continue
-            b_q = res_q[0]
-            c_q = df_all[df_all["ice_symbol"] == sym_q].sort_values("Date").copy()
-            quad_results.append((sym_q, m_q, b_q, c_q))
+        res_q = compute_band(commodity, m_q, hist_range, "open_interest", mtime=mt)
+        if res_q is None:
+            quad_results.append((sym_q, m_q, None, None))
+            continue
+        b_q = res_q[0]
+        c_q = df_all[df_all["ice_symbol"] == sym_q].sort_values("Date").copy()
+        quad_results.append((sym_q, m_q, b_q, c_q))
 
     fig4 = make_subplots(rows=2, cols=2,
         subplot_titles=[f"{s}  ({MONTH_NAMES.get(m, m)})" for s, m, _, _ in quad_results],
@@ -480,7 +481,7 @@ with tab_oi:
         if b_q is None:
             continue
         r, cl = idx//2+1, idx%2+1
-        add_oi_traces(fig4, b_q, c_q, sym_q, quad_fmt, row=r, col=cl, show_legend=False)
+        add_oi_traces(fig4, b_q, c_q, sym_q, ",.0f", row=r, col=cl, show_legend=False)
 
     fig4.update_layout(height=720, plot_bgcolor=C["bg"], paper_bgcolor=C["bg"],
                        font=dict(color=C["font"], family="Inter, sans-serif"),
@@ -489,17 +490,10 @@ with tab_oi:
         fig4.update_xaxes(range=[dte_range[0], dte_range[1]], showgrid=True, gridcolor=C["grid"],
                           tickfont=dict(size=10), zeroline=False,
                           row=(i-1)//2+1, col=(i-1)%2+1)
-        fig4.update_yaxes(showgrid=True, gridcolor=C["grid"],
-                          tickformat=".1f" if normalize else ",",
-                          ticksuffix="%" if normalize else "",
+        fig4.update_yaxes(showgrid=True, gridcolor=C["grid"], tickformat=",",
                           tickfont=dict(size=10), zeroline=False,
                           row=(i-1)//2+1, col=(i-1)%2+1)
     st.plotly_chart(fig4, use_container_width=True)
-    if normalize:
-        st.caption(
-            "Each contract divided by the historical average peak OI for its month. "
-            "Lines above 100% = bigger-than-typical year; below 100% = smaller."
-        )
 
     # ── OI Market Share ───────────────────────────────────────────────────────
     st.markdown("---")
