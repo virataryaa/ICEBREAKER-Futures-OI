@@ -151,7 +151,11 @@ def _normalize_oi(commodity, month, hist_year_range, current_sym, mtime=0.0):
     match = curr_dense[curr_dense["days_to_expiry"] == peak_dte]
     curr_anchor = match["open_interest"].iloc[0] if not match.empty else None
     if curr_anchor is None or pd.isna(curr_anchor) or curr_anchor <= 0:
-        curr_anchor = curr_df["open_interest"].max()
+        # Contract hasn't reached anchor DTE yet — use historical avg at that DTE
+        # so curr line shows OI as % of typical peak (comparable to the band).
+        curr_anchor = avg_curve.get(peak_dte)
+        if curr_anchor is None or pd.isna(curr_anchor) or curr_anchor <= 0:
+            curr_anchor = curr_df["open_interest"].max()
     if curr_anchor > 0:
         curr_df["open_interest"] = curr_df["open_interest"] / curr_anchor * 100
 
