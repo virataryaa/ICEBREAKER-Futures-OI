@@ -640,8 +640,19 @@ with tab_vol:
         vol_win = vol_all[vol_all["Date"] >= cutoff].copy()
         colors  = px.colors.qualitative.Bold
 
+        # Drop symbols with no real trading in this window (keeps legend clean)
+        traded_totals = vol_win.groupby("ice_symbol")["_rv"].sum()
+        active_win = [s for s in active_full if traded_totals.get(s, 0) > 0]
+
+        # Close weekend + holiday gaps on the date axis
+        all_bdays   = pd.bdate_range(vol_win["Date"].min(), vol_win["Date"].max())
+        missing_days= all_bdays.difference(pd.DatetimeIndex(vol_win["Date"].unique()))
+        rangebreaks = [dict(bounds=["sat", "mon"])]
+        if len(missing_days):
+            rangebreaks.append(dict(values=missing_days))
+
         fig_allvol = go.Figure()
-        for i, sym in enumerate(active_full):
+        for i, sym in enumerate(active_win):
             g = vol_win[vol_win["ice_symbol"] == sym].sort_values("Date")
             if g.empty:
                 continue
@@ -654,7 +665,7 @@ with tab_vol:
                        font=dict(size=16, color=C["font"]), x=0.01),
             xaxis=dict(title="Date", showgrid=True, gridcolor=C["grid"],
                       tickfont=dict(size=11, color=C["font"]),
-                      rangebreaks=[dict(bounds=["sat", "mon"])]),
+                      rangebreaks=rangebreaks),
             yaxis=dict(title=f"{roll_n}-Day Avg Volume (contracts)", showgrid=True,
                       gridcolor=C["grid"], tickfont=dict(size=11, color=C["font"])),
             plot_bgcolor=C["bg"], paper_bgcolor=C["bg"],
@@ -667,7 +678,7 @@ with tab_vol:
 
         # ── Stacked views: proportion (%) and absolute total ──────────────────
         pivot = (vol_win.pivot_table(index="Date", columns="ice_symbol", values="_rv", aggfunc="mean")
-                        .reindex(columns=active_full)
+                        .reindex(columns=active_win)
                         .fillna(0.0))
         totals = pivot.sum(axis=1)
         pct    = pivot.div(totals.replace(0, pd.NA), axis=0) * 100
@@ -676,9 +687,7 @@ with tab_vol:
 
         with col_pct:
             fig_pct = go.Figure()
-            for i, sym in enumerate(active_full):
-                if sym not in pct.columns:
-                    continue
+            for i, sym in enumerate(active_win):
                 fig_pct.add_trace(go.Bar(
                     x=pct.index, y=pct[sym], name=sym,
                     marker_color=colors[i % len(colors)],
@@ -689,7 +698,7 @@ with tab_vol:
                            font=dict(size=16, color=C["font"]), x=0.01),
                 xaxis=dict(title="Date", showgrid=True, gridcolor=C["grid"],
                           tickfont=dict(size=11, color=C["font"]),
-                          rangebreaks=[dict(bounds=["sat", "mon"])]),
+                          rangebreaks=rangebreaks),
                 yaxis=dict(title="Share of Rolling Volume", range=[0, 100], ticksuffix="%",
                           showgrid=True, gridcolor=C["grid"], tickfont=dict(size=11, color=C["font"])),
                 plot_bgcolor=C["bg"], paper_bgcolor=C["bg"],
@@ -703,9 +712,7 @@ with tab_vol:
 
         with col_abs:
             fig_abs = go.Figure()
-            for i, sym in enumerate(active_full):
-                if sym not in pivot.columns:
-                    continue
+            for i, sym in enumerate(active_win):
                 fig_abs.add_trace(go.Bar(
                     x=pivot.index, y=pivot[sym], name=sym,
                     marker_color=colors[i % len(colors)],
@@ -716,7 +723,7 @@ with tab_vol:
                            font=dict(size=16, color=C["font"]), x=0.01),
                 xaxis=dict(title="Date", showgrid=True, gridcolor=C["grid"],
                           tickfont=dict(size=11, color=C["font"]),
-                          rangebreaks=[dict(bounds=["sat", "mon"])]),
+                          rangebreaks=rangebreaks),
                 yaxis=dict(title=f"{roll_n}-Day Avg Volume (contracts)", showgrid=True,
                           gridcolor=C["grid"], tickfont=dict(size=11, color=C["font"])),
                 plot_bgcolor=C["bg"], paper_bgcolor=C["bg"],
