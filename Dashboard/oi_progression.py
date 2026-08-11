@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
 from plotly.subplots import make_subplots
 from pathlib import Path
 from datetime import date
@@ -614,6 +615,115 @@ with tab_vol:
             outer_color=C["rv_outer"], inner_color=C["rv_inner"], avg_color=C["rv_avg"],
             dte_range=dte_range, dte_now=d_now, height=460)
         st.plotly_chart(fig_rv, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── Chart: All Active Contracts — Rolling Volume (overlaid lines) ────────
+    st.markdown(f"#### All Active Contracts — Rolling {roll_n}-Day Volume")
+    st.caption("Rolling volume for every currently active contract, aligned by calendar date.")
+
+    df_vol_all = load_data(commodity, mt)
+    ltd_full   = df_vol_all.groupby("ice_symbol")["LTD"].first()
+    active_full= ltd_full[ltd_full >= today].sort_values().index.tolist()
+
+    pieces = []
+    for sym in active_full:
+        g = df_vol_all[df_vol_all["ice_symbol"] == sym].sort_values("Date").copy()
+        g["_rv"] = g["volume"].rolling(roll_n, min_periods=1).mean()
+        pieces.append(g[["Date", "ice_symbol", "_rv"]])
+    vol_all = pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
+
+    if not vol_all.empty:
+        lookback = st.slider("Lookback (calendar days)", 30, 365, 120, step=10,
+                             key="vol_all_lookback")
+        cutoff  = vol_all["Date"].max() - pd.Timedelta(days=lookback)
+        vol_win = vol_all[vol_all["Date"] >= cutoff].copy()
+        colors  = px.colors.qualitative.Bold
+
+        fig_allvol = go.Figure()
+        for i, sym in enumerate(active_full):
+            g = vol_win[vol_win["ice_symbol"] == sym].sort_values("Date")
+            if g.empty:
+                continue
+            fig_allvol.add_trace(go.Scatter(
+                x=g["Date"], y=g["_rv"], mode="lines", name=sym,
+                line=dict(width=2, color=colors[i % len(colors)]),
+                hovertemplate=f"<b>{sym}</b><br>%{{x|%b %d, %Y}}<br>%{{y:,.0f}}<extra></extra>"))
+        fig_allvol.update_layout(
+            title=dict(text=f"<b>{commodity}</b>  |  Rolling {roll_n}-Day Volume — All Active Contracts",
+                       font=dict(size=16, color=C["font"]), x=0.01),
+            xaxis=dict(title="Date", showgrid=True, gridcolor=C["grid"],
+                      tickfont=dict(size=11, color=C["font"])),
+            yaxis=dict(title=f"{roll_n}-Day Avg Volume (contracts)", showgrid=True,
+                      gridcolor=C["grid"], tickfont=dict(size=11, color=C["font"])),
+            plot_bgcolor=C["bg"], paper_bgcolor=C["bg"],
+            font=dict(color=C["font"], family="Inter, sans-serif"),
+            legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="left", x=0,
+                       bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
+            hovermode="x unified", height=480, margin=dict(l=70, r=30, t=60, b=90),
+        )
+        st.plotly_chart(fig_allvol, use_container_width=True)
+
+        # ── Stacked views: proportion (%) and absolute total ──────────────────
+        pivot = (vol_win.pivot_table(index="Date", columns="ice_symbol", values="_rv", aggfunc="mean")
+                        .reindex(columns=active_full)
+                        .fillna(0.0))
+        totals = pivot.sum(axis=1)
+        pct    = pivot.div(totals.replace(0, pd.NA), axis=0) * 100
+
+        col_pct, col_abs = st.columns(2)
+
+        with col_pct:
+            fig_pct = go.Figure()
+            for i, sym in enumerate(active_full):
+                if sym not in pct.columns:
+                    continue
+                fig_pct.add_trace(go.Bar(
+                    x=pct.index, y=pct[sym], name=sym,
+                    marker_color=colors[i % len(colors)],
+                    hovertemplate=f"<b>{sym}</b><br>%{{x|%b %d, %Y}}<br>%{{y:.1f}}%<extra></extra>"))
+            fig_pct.update_layout(
+                barmode="stack",
+                title=dict(text=f"<b>{commodity}</b>  |  Rolling Volume Mix (%)",
+                           font=dict(size=16, color=C["font"]), x=0.01),
+                xaxis=dict(title="Date", showgrid=True, gridcolor=C["grid"],
+                          tickfont=dict(size=11, color=C["font"])),
+                yaxis=dict(title="Share of Rolling Volume", range=[0, 100], ticksuffix="%",
+                          showgrid=True, gridcolor=C["grid"], tickfont=dict(size=11, color=C["font"])),
+                plot_bgcolor=C["bg"], paper_bgcolor=C["bg"],
+                font=dict(color=C["font"], family="Inter, sans-serif"),
+                bargap=0.02,
+                legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="left", x=0,
+                           bgcolor="rgba(0,0,0,0)", font=dict(size=9)),
+                hovermode="x unified", height=480, margin=dict(l=60, r=20, t=60, b=100),
+            )
+            st.plotly_chart(fig_pct, use_container_width=True)
+
+        with col_abs:
+            fig_abs = go.Figure()
+            for i, sym in enumerate(active_full):
+                if sym not in pivot.columns:
+                    continue
+                fig_abs.add_trace(go.Bar(
+                    x=pivot.index, y=pivot[sym], name=sym,
+                    marker_color=colors[i % len(colors)],
+                    hovertemplate=f"<b>{sym}</b><br>%{{x|%b %d, %Y}}<br>%{{y:,.0f}}<extra></extra>"))
+            fig_abs.update_layout(
+                barmode="stack",
+                title=dict(text=f"<b>{commodity}</b>  |  Total Rolling Volume (stacked)",
+                           font=dict(size=16, color=C["font"]), x=0.01),
+                xaxis=dict(title="Date", showgrid=True, gridcolor=C["grid"],
+                          tickfont=dict(size=11, color=C["font"])),
+                yaxis=dict(title=f"{roll_n}-Day Avg Volume (contracts)", showgrid=True,
+                          gridcolor=C["grid"], tickfont=dict(size=11, color=C["font"])),
+                plot_bgcolor=C["bg"], paper_bgcolor=C["bg"],
+                font=dict(color=C["font"], family="Inter, sans-serif"),
+                bargap=0.02,
+                legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="left", x=0,
+                           bgcolor="rgba(0,0,0,0)", font=dict(size=9)),
+                hovermode="x unified", height=480, margin=dict(l=70, r=20, t=60, b=100),
+            )
+            st.plotly_chart(fig_abs, use_container_width=True)
 
     st.markdown("---")
 
