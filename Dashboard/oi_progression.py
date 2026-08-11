@@ -619,30 +619,36 @@ with tab_vol:
     st.markdown("---")
 
     # ── Chart: All Active Contracts — Rolling Volume (overlaid lines) ────────
-    st.markdown(f"#### All Active Contracts — Rolling {roll_n}-Day Volume")
-    st.caption("Rolling volume for every currently active contract, aligned by calendar date.")
+    st.markdown(f"#### All Contracts — Rolling {roll_n}-Day Volume")
+    st.caption("Rolling volume for every contract that traded within the lookback window "
+               "(includes contracts that have since expired, so historical totals stay accurate).")
 
     df_vol_all = load_data(commodity, mt)
-    ltd_full   = df_vol_all.groupby("ice_symbol")["LTD"].first()
-    active_full= ltd_full[ltd_full >= today].sort_values().index.tolist()
+
+    lookback = st.slider("Lookback (calendar days)", 30, 365, 120, step=10,
+                         key="vol_all_lookback")
+    cutoff = df_vol_all["Date"].max() - pd.Timedelta(days=lookback)
+
+    # Any symbol that traded in the window — not just ones still unexpired today,
+    # otherwise a contract that rolled off mid-window vanishes from past totals/mix.
+    ltd_full      = df_vol_all.groupby("ice_symbol")["LTD"].first()
+    syms_in_window= df_vol_all.loc[df_vol_all["Date"] >= cutoff, "ice_symbol"].unique()
+    relevant_syms = ltd_full[ltd_full.index.isin(syms_in_window)].sort_values().index.tolist()
 
     pieces = []
-    for sym in active_full:
+    for sym in relevant_syms:
         g = df_vol_all[df_vol_all["ice_symbol"] == sym].sort_values("Date").copy()
         g["_rv"] = g["volume"].rolling(roll_n, min_periods=1).mean()
         pieces.append(g[["Date", "ice_symbol", "_rv"]])
     vol_all = pd.concat(pieces, ignore_index=True) if pieces else pd.DataFrame()
 
     if not vol_all.empty:
-        lookback = st.slider("Lookback (calendar days)", 30, 365, 120, step=10,
-                             key="vol_all_lookback")
-        cutoff  = vol_all["Date"].max() - pd.Timedelta(days=lookback)
         vol_win = vol_all[vol_all["Date"] >= cutoff].copy()
         colors  = px.colors.qualitative.Bold
 
         # Drop symbols with no real trading in this window (keeps legend clean)
         traded_totals = vol_win.groupby("ice_symbol")["_rv"].sum()
-        active_win = [s for s in active_full if traded_totals.get(s, 0) > 0]
+        active_win = [s for s in relevant_syms if traded_totals.get(s, 0) > 0]
 
         # Close weekend + holiday gaps on the date axis
         all_bdays   = pd.bdate_range(vol_win["Date"].min(), vol_win["Date"].max())
@@ -661,7 +667,7 @@ with tab_vol:
                 line=dict(width=2, color=colors[i % len(colors)]),
                 hovertemplate=f"<b>{sym}</b><br>%{{x|%b %d, %Y}}<br>%{{y:,.0f}}<extra></extra>"))
         fig_allvol.update_layout(
-            title=dict(text=f"<b>{commodity}</b>  |  Rolling {roll_n}-Day Volume — All Active Contracts",
+            title=dict(text=f"<b>{commodity}</b>  |  Rolling {roll_n}-Day Volume — All Contracts",
                        font=dict(size=16, color=C["font"]), x=0.01),
             xaxis=dict(title="Date", showgrid=True, gridcolor=C["grid"],
                       tickfont=dict(size=11, color=C["font"]),
